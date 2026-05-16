@@ -20,12 +20,18 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# —- Constants —-
+import os
 
-MODEL_PATH: str    = os.environ.get("TFLITE_MODEL_PATH", "tiny_model.tflite")
-INPUT_SIZE: int    = 224       # Model expects 224 × 224 pixels
-THRESHOLD: float   = 0.5      # sigmoid ≥ 0.5 → Malignant
-LABELS: list[str]  = ["Benign", "Malignant"]
+# 1. Dynamically locate the Backend directory
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_FILENAME = os.environ.get("TFLITE_MODEL_PATH", "tiny_model.tflite")
+
+# 2. Build the explicit absolute system path
+MODEL_PATH: str   = os.path.join(CURRENT_DIR, MODEL_FILENAME)
+INPUT_SIZE: int   = 224          # Model expects 224 x 224 pixels
+THRESHOLD: float  = 0.5          # sigmoid >= 0.5 -> Malignant
+LABELS: list[str] = ["Benign", "Malignant"]
 
 # ── Load interpreter once (module-level singleton) ────────────────────────────
 
