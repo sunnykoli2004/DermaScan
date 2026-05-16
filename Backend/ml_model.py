@@ -3,71 +3,193 @@ ml_model.py
 -----------
 Loads the TFLite model once at startup and exposes a single predict() function.
 
-Model facts (confirmed by inspection):
-  - Input  : [1, 224, 224, 3]  float32  (normalised to 0-1)
-  - Output : [1, 1]            float32  (sigmoid — binary classifier)
-  - Labels : 0 → Benign  |  1 → Malignant  (threshold = 0.5)
+Model facts (confirmed by tensor inspection):
+  Input  : [1, 224, 224, 3]  float32   (RGB, normalised to 0–1)
+  Output : [1, 1]            float32   (sigmoid — binary classifier)
+  Labels : score < 0.5 → Benign  |  score >= 0.5 → Malignant
+
+──────────────────────────────────────────────────────────────────────────────
+WHY tflite-runtime WAS REMOVED
+──────────────────────────────────────────────────────────────────────────────
+Google discontinued tflite-runtime as a standalone PyPI package after
+TensorFlow 2.14. It ships NO wheel for Python 3.11 or 3.12, so any cloud
+host running a modern runtime (Render default = Python 3.12) gets a silent
+install failure → _interpreter stays None → every prediction raises:
+  "ML model is not loaded. Check TFLITE_MODEL_PATH and logs."
+
+The official replacement is ai-edge-litert, which:
+  • Has the identical Interpreter API  (drop-in, zero code changes needed)
+  • Ships wheels for Python 3.9 – 3.12 on Linux x86_64, macOS, Windows
+  • Is maintained by Google's Edge AI team (released 2024)
+  pip install ai-edge-litert
+
+──────────────────────────────────────────────────────────────────────────────
+MODEL FILE ON RENDER
+──────────────────────────────────────────────────────────────────────────────
+Render clones your GitHub repo, so tiny_model.tflite MUST be committed.
+If the file is in .gitignore (common for large binaries), this module will
+automatically download it from your S3 bucket on first boot as a fallback.
+Add the env var  TFLITE_S3_KEY=tiny_model.tflite  to your Render service
+to enable this behaviour.
 """
 
-import os
+from __future__ import annotations
+
 import io
 import logging
-from typing import Tuple
+import os
+from typing import TYPE_CHECKING, Tuple
 
+import boto3
 import numpy as np
 from PIL import Image
 
+# TYPE_CHECKING block suppresses the yellow "unresolved import" underline in
+# VS Code / Pylance for packages that have no bundled type stubs.
+# At runtime the actual import happens in the try/except block below.
+if TYPE_CHECKING:
+    from ai_edge_litert.interpreter import Interpreter as _InterpreterType  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# —- Constants —-
-import os
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
 
-# 1. First, establish the core path variables
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Absolute path: always resolves relative to this file's directory,
+# regardless of where uvicorn is launched from.
+_HERE         = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = os.environ.get("TFLITE_MODEL_PATH", "tiny_model.tflite")
+MODEL_PATH     = os.path.join(_HERE, MODEL_FILENAME)
 
-# 2. Assign the absolute variable name completely FIRST
-MODEL_PATH: str   = os.path.join(CURRENT_DIR, MODEL_FILENAME)
-INPUT_SIZE: int   = 224          # Model expects 224 x 224 pixels
-THRESHOLD: float  = 0.5          # sigmoid >= 0.5 -> Malignant
-LABELS: list[str] = ["Benign", "Malignant"]
+# Optional: S3 key to download the model if it is missing from the filesystem.
+# Set TFLITE_S3_KEY in your Render environment variables.
+# Leave blank to disable S3 fallback.
+TFLITE_S3_KEY: str = os.environ.get("TFLITE_S3_KEY", "")
+S3_BUCKET:     str = os.environ.get("S3_BUCKET", "")
+AWS_REGION:    str = os.environ.get("AWS_REGION", "ap-southeast-2")
 
-# 3. NOW it is safe to log them! (Move these below line 29)
-logger.info(f"Checking absolute MODEL_PATH: {MODEL_PATH}")
-logger.info(f"Files inside current directory: {os.listdir(CURRENT_DIR)}")
+INPUT_SIZE: int    = 224
+THRESHOLD:  float  = 0.5
+LABELS:     list   = ["Benign", "Malignant"]
 
-# ── Load interpreter once (module-level singleton) ────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Ensure the model file exists (S3 fallback for cloud deployments)
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-try:
-    # This will run smoothly on Render (Linux Cloud Environment)
-    from tflite_runtime.interpreter import Interpreter
-    logger.info("Using lightweight tflite_runtime Interpreter for Cloud Inference")
-except ImportError:
-    # This is your safe fallback for local Windows testing
-    from tensorflow.lite.python.interpreter import Interpreter
-    logger.info("tflite_runtime not found. Falling back to local TensorFlow Interpreter wrapper")
-
-try:
-    # Initialize your singleton interpreter object cleanly using the imported class
-    _interpreter = Interpreter(model_path=MODEL_PATH)
-    _interpreter.allocate_tensors()
-
-    _input_details = _interpreter.get_input_details()
-    _output_details = _interpreter.get_output_details()
+def _download_model_from_s3() -> bool:
+    """
+    Download the TFLite model from S3 to MODEL_PATH.
+    Called only when the file is missing AND TFLITE_S3_KEY is configured.
+    Returns True on success, False on failure.
+    """
+    if not TFLITE_S3_KEY or not S3_BUCKET:
+        logger.warning(
+            "Model file not found at '%s' and TFLITE_S3_KEY / S3_BUCKET are "
+            "not set. Cannot download from S3. "
+            "Commit tiny_model.tflite to your GitHub repo so Render can access it.",
+            MODEL_PATH,
+        )
+        return False
 
     logger.info(
-        "TFLite model loaded - input shape: %s, output shape: %s",
-        _input_details[0]["shape"],
-        _output_details[0]["shape"],
+        "Model file not found locally. Downloading s3://%s/%s → %s",
+        S3_BUCKET, TFLITE_S3_KEY, MODEL_PATH,
     )
-except Exception as exc:
-    _interpreter = None
-    logger.error("TFLite model failed to load: %s", exc)
+    try:
+        s3 = boto3.client("s3", region_name=AWS_REGION)
+        s3.download_file(S3_BUCKET, TFLITE_S3_KEY, MODEL_PATH)
+        size_mb = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+        logger.info("Model downloaded successfully (%.2f MB).", size_mb)
+        return True
+    except Exception as exc:
+        logger.error("S3 model download failed: %s", exc)
+        return False
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+if not os.path.isfile(MODEL_PATH):
+    logger.warning("Model not found at '%s'. Attempting S3 download…", MODEL_PATH)
+    _download_model_from_s3()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Import the Interpreter (ai-edge-litert → tensorflow fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+# Import priority:
+#   1. ai-edge-litert   — Google's official replacement for tflite-runtime.
+#                         Works on Python 3.9–3.12 / Linux / macOS / Windows.
+#                         Install: pip install ai-edge-litert
+#
+#   2. tensorflow.lite  — Full TensorFlow. Works everywhere but ~500 MB install.
+#                         Use only as a last resort (may exceed Render free-tier RAM).
+#
+# NOTE: tflite-runtime is intentionally NOT in this chain.
+#       It has no Python 3.11/3.12 wheel and will always fail on modern hosts.
+
+_Interpreter = None  # will hold the class, not an instance
+
+try:
+    from ai_edge_litert.interpreter import Interpreter as _Interpreter  # type: ignore[assignment]
+    logger.info("Loaded Interpreter from ai_edge_litert (recommended).")
+except ImportError as _e1:
+    logger.warning("ai_edge_litert not available (%s). Trying full TensorFlow…", _e1)
+    try:
+        from tensorflow.lite.python.interpreter import Interpreter as _Interpreter  # type: ignore[assignment]
+        logger.info("Loaded Interpreter from tensorflow.lite (fallback).")
+    except ImportError as _e2:
+        logger.error(
+            "CRITICAL — No TFLite Interpreter available!\n"
+            "  ai_edge_litert error : %s\n"
+            "  tensorflow error     : %s\n"
+            "  Fix: add 'ai-edge-litert' to requirements.txt",
+            _e1, _e2,
+        )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Instantiate the singleton interpreter
+# ─────────────────────────────────────────────────────────────────────────────
+
+_interpreter     = None
+_input_details   = None
+_output_details  = None
+
+logger.info("Resolved MODEL_PATH : %s", MODEL_PATH)
+logger.info(
+    "Files in backend directory : %s",
+    os.listdir(_HERE) if os.path.isdir(_HERE) else "directory not found",
+)
+
+if _Interpreter is not None:
+    if not os.path.isfile(MODEL_PATH):
+        logger.error(
+            "Model file still missing at '%s' after S3 attempt. "
+            "Predictions will fail. "
+            "Action required: commit tiny_model.tflite to your repo "
+            "or set TFLITE_S3_KEY in Render environment variables.",
+            MODEL_PATH,
+        )
+    else:
+        try:
+            _interpreter = _Interpreter(model_path=MODEL_PATH)
+            _interpreter.allocate_tensors()
+            _input_details  = _interpreter.get_input_details()
+            _output_details = _interpreter.get_output_details()
+            logger.info(
+                "TFLite model ready — input %s  output %s",
+                _input_details[0]["shape"],
+                _output_details[0]["shape"],
+            )
+        except Exception as exc:
+            logger.error("Failed to initialise TFLite interpreter: %s", exc)
+            _interpreter = None
+else:
+    logger.error(
+        "No Interpreter class loaded. Install ai-edge-litert: "
+        "pip install ai-edge-litert"
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC API
+# ─────────────────────────────────────────────────────────────────────────────
 
 def predict_from_bytes(image_bytes: bytes) -> Tuple[str, float, float]:
     """
@@ -80,50 +202,56 @@ def predict_from_bytes(image_bytes: bytes) -> Tuple[str, float, float]:
 
     Returns
     -------
-    prediction  : str    — "Benign" or "Malignant"
-    confidence  : float  — 0.0–100.0 percentage  (e.g. 94.7)
-    raw_score   : float  — raw sigmoid value      (e.g. 0.053)
+    prediction : str   — "Benign" or "Malignant"
+    confidence : float — 50.0–100.0 percentage  (e.g. 94.73)
+    raw_score  : float — raw sigmoid value       (e.g. 0.052700)
     """
     if _interpreter is None:
-        raise RuntimeError("ML model is not loaded. Check TFLITE_MODEL_PATH and logs.")
+        raise RuntimeError(
+            "ML model is not loaded. "
+            "Check that ai-edge-litert is installed and tiny_model.tflite "
+            "is present in the backend directory (or set TFLITE_S3_KEY)."
+        )
 
-    # 1. Decode and pre-process the image
+    # Pre-process: decode → resize 224×224 → normalise [0,1] → batch dim
     tensor = _preprocess(image_bytes)
 
-    # 2. Feed into interpreter
+    # Inference
     _interpreter.set_tensor(_input_details[0]["index"], tensor)
     _interpreter.invoke()
 
-    # 3. Read sigmoid output
-    raw_score: float = float(_interpreter.get_tensor(_output_details[0]["index"])[0][0])
+    # Read output
+    raw_score: float = float(
+        _interpreter.get_tensor(_output_details[0]["index"])[0][0]
+    )
 
-    # 4. Threshold → label
-    prediction: str  = LABELS[int(raw_score >= THRESHOLD)]
+    # Threshold → label
+    prediction: str = LABELS[int(raw_score >= THRESHOLD)]
 
-    # 5. Confidence: distance from decision boundary, mapped to 50-100%
-    #    e.g. raw=0.05 → confidence 97.5%  (benign, very sure)
-    #         raw=0.95 → confidence 97.5%  (malignant, very sure)
-    #         raw=0.50 → confidence 50.0%  (uncertain)
-    if raw_score >= THRESHOLD:
-        confidence = raw_score * 100.0          # 50→100 for malignant
-    else:
-        confidence = (1.0 - raw_score) * 100.0  # 50→100 for benign
+    # Confidence: maps the sigmoid output to 50–100% range so 0.5 (uncertain)
+    # gives 50% and 0.99 (very sure) gives 99%.
+    confidence: float = (
+        raw_score * 100.0 if raw_score >= THRESHOLD
+        else (1.0 - raw_score) * 100.0
+    )
 
     logger.info(
-        "Prediction: %s | confidence: %.2f%% | raw_score: %.6f",
+        "Prediction: %-10s | confidence: %6.2f%% | raw_score: %.6f",
         prediction, confidence, raw_score,
     )
     return prediction, round(confidence, 2), round(raw_score, 6)
 
 
-# ── Private helpers ───────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# PRIVATE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _preprocess(image_bytes: bytes) -> np.ndarray:
     """
-    Decode → resize to 224×224 → normalise to [0, 1] → add batch dim.
-    Returns shape (1, 224, 224, 3) float32.
+    Decode → RGB → resize 224×224 → normalise to [0,1] → add batch dim.
+    Returns ndarray of shape (1, 224, 224, 3) dtype float32.
     """
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((INPUT_SIZE, INPUT_SIZE), Image.LANCZOS)
-    arr = np.array(img, dtype=np.float32) / 255.0        # normalise
-    return np.expand_dims(arr, axis=0)                   # (1, 224, 224, 3)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return np.expand_dims(arr, axis=0)  # (1, 224, 224, 3)
