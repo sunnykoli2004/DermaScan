@@ -23,15 +23,19 @@ logger = logging.getLogger(__name__)
 # —- Constants —-
 import os
 
-# 1. Dynamically locate the Backend directory
+# 1. First, establish the core path variables
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = os.environ.get("TFLITE_MODEL_PATH", "tiny_model.tflite")
 
-# 2. Build the explicit absolute system path
+# 2. Assign the absolute variable name completely FIRST
 MODEL_PATH: str   = os.path.join(CURRENT_DIR, MODEL_FILENAME)
 INPUT_SIZE: int   = 224          # Model expects 224 x 224 pixels
 THRESHOLD: float  = 0.5          # sigmoid >= 0.5 -> Malignant
 LABELS: list[str] = ["Benign", "Malignant"]
+
+# 3. NOW it is safe to log them! (Move these below line 29)
+logger.info(f"Checking absolute MODEL_PATH: {MODEL_PATH}")
+logger.info(f"Files inside current directory: {os.listdir(CURRENT_DIR)}")
 
 # ── Load interpreter once (module-level singleton) ────────────────────────────
 
