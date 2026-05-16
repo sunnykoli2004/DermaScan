@@ -88,8 +88,8 @@ async def lifespan(app: FastAPI):
     This is idempotent — safe to run every restart.
     """
     logger.info("Running startup: creating database tables if absent…")
-    models.Base.metadata.drop_all(bind=engine)
     
+    #models.Base.metadata.drop_all(bind=engine)
     models.Base.metadata.create_all(bind=engine)
     logger.info("Database tables are ready.")
     yield
@@ -109,11 +109,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",     # Vite dev server
-        "http://127.0.0.1:5173",
-        os.environ.get("FRONTEND_URL", ""),   # Production URL from .env
-    ],
+    allow_origins=["*"],  # Allows any live production frontend to connect successfully
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
