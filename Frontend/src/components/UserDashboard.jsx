@@ -6,8 +6,7 @@ import { GoogleMap, useLoadScript, Marker } from "@react-google-maps/api";
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE = "http://127.0.0.1:8000";
-
+const API_BASE = import.meta.env.VITE_API_BASE;
 // Maps every prediction label the backend can return to a Tailwind colour set.
 // _default is the safe fallback for any unexpected label.
 const BADGE_STYLES = {
