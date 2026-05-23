@@ -1,5 +1,10 @@
-import axios from'axios';
-import { useState } from "react";
+import axios from "axios";
+import { useState, useEffect } from "react";
+
+// ── API base URL ──────────────────────────────────────────────────────────────
+// Reads from the Vercel environment variable VITE_API_BASE.
+// Falls back to the Render URL so it always works even if the env var is unset.
+const API_BASE = import.meta.env.VITE_API_BASE || "https://skincancerdetector-vwlq.onrender.com";
 
 const PRECAUTIONS = [
   {
@@ -68,85 +73,102 @@ const PRECAUTIONS = [
 ];
 
 export default function LandingView({ navigateTo }) {
-  const [authMode, setAuthMode] = useState("signin");
-  const [showOTP, setShowOTP] = useState(false);
-  const [otp, setOtp] = useState("");
-  const [formData, setFormData] = useState({ email: "", password: "", name: "" });
+  const [authMode, setAuthMode]           = useState("signin");
+  const [showOTP, setShowOTP]             = useState(false);
+  const [otp, setOtp]                     = useState("");
+  const [formData, setFormData]           = useState({ email: "", password: "", name: "" });
   const [disclaimerChecked, setDisclaimerChecked] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [errors, setErrors] = useState({});
+  const [isLoading, setIsLoading]         = useState(false);
+  const [errors, setErrors]               = useState({});
+
+  // ── Render warm-up ping ───────────────────────────────────────────────────
+  // Render's free tier sleeps after 15 min of inactivity and takes ~60 s to
+  // wake. Pinging /health the moment the landing page loads means the server
+  // is already warm by the time the user fills the form and hits Submit.
+  useEffect(() => {
+    axios.get(`${API_BASE}/health`).catch(() => {});
+  }, []);
 
   const validate = () => {
     const e = {};
     if (!formData.email.includes("@")) e.email = "Enter a valid email.";
-    if (formData.password.length < 6) e.password = "Password must be at least 6 characters.";
+    if (formData.password.length < 6)  e.password = "Password must be at least 6 characters.";
     if (authMode === "register" && !formData.name.trim()) e.name = "Name is required.";
     return e;
   };
 
+  // ── Sign-in / Register ────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
-    // 1. Prevent accidental page reloads
     if (e && e.preventDefault) e.preventDefault();
-
     const errs = validate();
     if (Object.keys(errs).length) { setErrors(errs); return; }
-    
     setErrors({});
     setIsLoading(true);
 
     try {
-        if (authMode === "signin") {
-            // LOGIN FLOW
-            const res = await axios.post(`http://127.0.0.1:8000/login`, {
-                email: formData.email,
-                password: formData.password,
-            });
+      if (authMode === "signin") {
+        // BUG 1 FIX: uses API_BASE (Render URL) instead of 127.0.0.1
+        const res = await axios.post(`${API_BASE}/login`, {
+          email:    formData.email,
+          password: formData.password,
+        });
 
-            if (res.data.success || res.status === 200) {
-                localStorage.setItem("userEmail", res.data.email);
-                localStorage.setItem("isAuthenticated", "true");
-                navigateTo("user"); 
-            }
-        } else {
-            // REGISTRATION FLOW -> Triggers OTP
-            const res = await axios.post(`http://127.0.0.1:8000/register`, {
-                name: formData.name,
-                email: formData.email,
-                password: formData.password,
-            });
-            // Show the OTP screen
-            setShowOTP(true);
+        if (res.data.success || res.status === 200) {
+          const userName = res.data.name || formData.email.split("@")[0];
+          localStorage.setItem("userEmail",        res.data.email);
+          localStorage.setItem("userName",         userName);
+          localStorage.setItem("isAuthenticated",  "true");
+
+          // BUG 2 FIX: pass user object so UserDashboard prop is never null
+          navigateTo("user", { email: res.data.email, name: userName });
         }
+
+      } else {
+        // BUG 1 FIX: register also uses API_BASE
+        await axios.post(`${API_BASE}/register`, {
+          email:    formData.email,
+          password: formData.password,
+        });
+        setShowOTP(true);
+      }
     } catch (error) {
-        console.error("Auth failed:", error);
-        setErrors({ auth: error.response?.data?.detail || "Invalid credentials or server error" });
+      const detail = error.response?.data?.detail;
+      setErrors({
+        auth: typeof detail === "string"
+          ? detail
+          : "Invalid credentials or server error.",
+      });
     } finally {
-        setIsLoading(false);
+      setIsLoading(false);
     }
   };
 
-
-    const handleVerifyOTP = async (e) => {
+  // ── OTP verification ──────────────────────────────────────────────────────
+  const handleVerifyOTP = async (e) => {
     e.preventDefault();
     setErrors({});
     setIsLoading(true);
 
     try {
-        const res = await axios.post(`http://127.0.0.1:8000/verify-otp`, {
-            email: formData.email,
-            otp: otp
-        });
+      // BUG 1 FIX: verify-otp also uses API_BASE
+      const res = await axios.post(`${API_BASE}/verify-otp`, {
+        email: formData.email,
+        otp:   otp,
+      });
 
-        if (res.data.success || res.status === 200) {
-            // OTP is correct! Log them in.
-            localStorage.setItem("userEmail", formData.email);
-            localStorage.setItem("isAuthenticated", "true");
-            navigateTo("user");
-        }
+      if (res.data.success || res.status === 200) {
+        const userName = formData.name || formData.email.split("@")[0];
+        localStorage.setItem("userEmail",       formData.email);
+        localStorage.setItem("userName",        userName);
+        localStorage.setItem("isAuthenticated", "true");
+
+        // BUG 2 FIX: pass user object here too
+        navigateTo("user", { email: formData.email, name: userName });
+      }
     } catch (error) {
-        setErrors({ auth: "Invalid or expired verification code." });
+      setErrors({ auth: "Invalid or expired verification code." });
     } finally {
-        setIsLoading(false);
+      setIsLoading(false);
     }
   };
 
@@ -155,14 +177,18 @@ export default function LandingView({ navigateTo }) {
     setErrors((p) => ({ ...p, [field]: undefined }));
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // RENDER
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-sky-50 to-slate-100">
-      {/* ── HEADER ─────────────────────────────────────────── */}
+
+      {/* ── Header ── */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200/70 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-sky-600 flex items-center justify-center shadow-md">
-              <svg className="w-4.5 h-4.5 text-white w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+              <svg className="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd"/>
               </svg>
             </div>
@@ -176,10 +202,7 @@ export default function LandingView({ navigateTo }) {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block"/>
               System Online
             </span>
-            <button
-              onClick={() => navigateTo("admin")}
-              className="text-xs text-slate-400 hover:text-sky-600 transition-colors font-medium"
-            >
+            <button onClick={() => navigateTo("admin")} className="text-xs text-slate-400 hover:text-sky-600 transition-colors font-medium">
               Admin
             </button>
           </div>
@@ -189,9 +212,8 @@ export default function LandingView({ navigateTo }) {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12">
         <div className="lg:grid lg:grid-cols-12 lg:gap-12 lg:items-start">
 
-          {/* ── LEFT COLUMN: Hero + Cards ───────────────────── */}
+          {/* ── Left: Hero + Precaution Cards ── */}
           <div className="lg:col-span-7 xl:col-span-8 mb-10 lg:mb-0">
-            {/* Hero */}
             <div className="mb-8">
               <div className="inline-flex items-center gap-2 bg-sky-600/10 text-sky-700 text-xs font-semibold px-3 py-1.5 rounded-full border border-sky-200 mb-4">
                 <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/></svg>
@@ -202,7 +224,7 @@ export default function LandingView({ navigateTo }) {
                 <span className="text-sky-600">Intelligence</span> Platform
               </h1>
               <p className="text-slate-500 text-base lg:text-lg leading-relaxed max-w-2xl">
-                Upload a photo, get an instant AI-assisted analysis, and connect with certified dermatologists near you. 
+                Upload a photo, get an instant AI-assisted analysis, and connect with certified dermatologists near you.
                 <span className="font-medium text-slate-700"> Early detection saves lives.</span>
               </p>
             </div>
@@ -211,7 +233,7 @@ export default function LandingView({ navigateTo }) {
             <div className="grid grid-cols-3 gap-3 mb-8">
               {[
                 { label: "Scans Analyzed", value: "2.4M+" },
-                { label: "Accuracy Rate", value: "94.7%" },
+                { label: "Accuracy Rate",  value: "94.7%" },
                 { label: "Partner Clinics", value: "1,200+" },
               ].map((s) => (
                 <div key={s.label} className="bg-white rounded-xl p-3.5 sm:p-4 border border-slate-200 shadow-sm text-center">
@@ -228,10 +250,7 @@ export default function LandingView({ navigateTo }) {
               </h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {PRECAUTIONS.map((p) => (
-                  <div
-                    key={p.title}
-                    className={`flex items-start gap-3.5 p-4 rounded-xl border bg-white shadow-sm hover:shadow-md transition-shadow duration-200`}
-                  >
+                  <div key={p.title} className="flex items-start gap-3.5 p-4 rounded-xl border bg-white shadow-sm hover:shadow-md transition-shadow duration-200">
                     <div className={`p-2 rounded-lg border ${p.color} shrink-0`}>{p.icon}</div>
                     <div>
                       <div className="font-bold text-slate-800 text-sm mb-1">{p.title}</div>
@@ -243,209 +262,224 @@ export default function LandingView({ navigateTo }) {
             </div>
           </div>
 
-          {/* ── RIGHT COLUMN: Auth Form ──────────────────────── */}
+          {/* ── Right: Auth Form ── */}
           <div className="lg:col-span-5 xl:col-span-4 lg:sticky lg:top-24">
+
+            {/* ── OTP Screen ── */}
             {showOTP ? (
-              <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden p-8 text-center animate-fade-in">
+              <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden p-8 text-center">
                 <div className="w-16 h-16 bg-sky-50 rounded-2xl flex items-center justify-center mx-auto mb-6 text-sky-500">
-                  <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                  <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                  </svg>
                 </div>
                 <h2 className="text-2xl font-black text-slate-800 mb-2">Check your email</h2>
                 <p className="text-sm text-slate-500 mb-8 font-medium leading-relaxed">
-                  We've sent a 6-digit verification code to <br/>
+                  We sent a 6-digit code to<br/>
                   <span className="font-bold text-slate-800">{formData.email}</span>
                 </p>
-
                 <form onSubmit={handleVerifyOTP} className="space-y-6">
-                  <div>
-                    <input
-                      type="text"
-                      maxLength="6"
-                      value={otp}
-                      onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                      placeholder="000000"
-                      className="w-full text-center text-3xl font-black tracking-[0.5em] text-slate-800 bg-slate-50 border border-slate-200 rounded-xl py-4 focus:outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 transition-all"
-                    />
-                  </div>
+                  <input
+                    type="text"
+                    maxLength="6"
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+                    placeholder="000000"
+                    className="w-full text-center text-3xl font-black tracking-[0.5em] text-slate-800 bg-slate-50 border border-slate-200 rounded-xl py-4 focus:outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 transition-all"
+                  />
                   {errors.auth && <p className="text-rose-500 text-xs font-bold">{errors.auth}</p>}
-                  <button type="submit" disabled={isLoading || otp.length !== 6} className="w-full bg-slate-900 text-white font-black rounded-xl py-4 hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-50">
-                    {isLoading ? "Verifying..." : "Verify Account"}
+                  <button
+                    type="submit"
+                    disabled={isLoading || otp.length !== 6}
+                    className="w-full bg-slate-900 text-white font-black rounded-xl py-4 hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-50"
+                  >
+                    {isLoading ? "Verifying…" : "Verify Account"}
                   </button>
                 </form>
-                <button onClick={() => setShowOTP(false)} className="mt-6 text-xs font-bold text-slate-400 hover:text-slate-600 transition-colors underline underline-offset-2">
-                  Wrong email address? Go back.
+                <button
+                  onClick={() => { setShowOTP(false); setOtp(""); }}
+                  className="mt-6 text-xs font-bold text-slate-400 hover:text-slate-600 transition-colors underline underline-offset-2"
+                >
+                  Wrong email? Go back.
                 </button>
               </div>
+
             ) : (
-            <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden">
-              {/* Form header */}
-              <div className="bg-gradient-to-r from-sky-600 to-sky-500 px-6 py-5">
-                <h2 className="text-white font-bold text-xl tracking-tight">
-                  {authMode === "signin" ? "Welcome Back" : "Create Account"}
-                </h2>
-                <p className="text-sky-100 text-sm mt-0.5">
-                  {authMode === "signin" ? "Sign in to access your dashboard" : "Join DermaScan today — it's free"}
-                </p>
-              </div>
+              /* ── Sign In / Register form ── */
+              <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden">
+                {/* Form header */}
+                <div className="bg-gradient-to-r from-sky-600 to-sky-500 px-6 py-5">
+                  <h2 className="text-white font-bold text-xl tracking-tight">
+                    {authMode === "signin" ? "Welcome Back" : "Create Account"}
+                  </h2>
+                  <p className="text-sky-100 text-sm mt-0.5">
+                    {authMode === "signin" ? "Sign in to access your dashboard" : "Join DermaScan today — it's free"}
+                  </p>
+                </div>
 
-              {/* Toggle tabs */}
-              <div className="flex border-b border-slate-100">
-                {["signin", "register"].map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => { setAuthMode(m); setErrors({}); setDisclaimerChecked(false); }}
-                    className={`flex-1 py-3 text-sm font-semibold transition-colors ${
-                      authMode === m
-                        ? "text-sky-600 border-b-2 border-sky-600 bg-sky-50/50"
-                        : "text-slate-400 hover:text-slate-600"
-                    }`}
-                  >
-                    {m === "signin" ? "Sign In" : "Create Account"}
-                  </button>
-                ))}
-              </div>
+                {/* Tabs */}
+                <div className="flex border-b border-slate-100">
+                  {["signin", "register"].map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => { setAuthMode(m); setErrors({}); setDisclaimerChecked(false); }}
+                      className={`flex-1 py-3 text-sm font-semibold transition-colors ${
+                        authMode === m
+                          ? "text-sky-600 border-b-2 border-sky-600 bg-sky-50/50"
+                          : "text-slate-400 hover:text-slate-600"
+                      }`}
+                    >
+                      {m === "signin" ? "Sign In" : "Create Account"}
+                    </button>
+                  ))}
+                </div>
 
-              <div className="p-6 space-y-4">
-                {/* Name field (register only) */}
-                {authMode === "register" && (
+                <div className="p-6 space-y-4">
+                  {/* Name (register only) */}
+                  {authMode === "register" && (
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Full Name</label>
+                      <input
+                        type="text"
+                        value={formData.name}
+                        onChange={handleChange("name")}
+                        placeholder="Sunny Koli"
+                        className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
+                          errors.name ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
+                        }`}
+                      />
+                      {errors.name && <p className="text-rose-500 text-xs mt-1">{errors.name}</p>}
+                    </div>
+                  )}
+
+                  {/* Email */}
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                      Full Name
-                    </label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Email Address</label>
                     <input
-                      type="text"
-                      value={formData.name}
-                      onChange={handleChange("name")}
-                      placeholder="Sunny Koli"
+                      type="email"
+                      value={formData.email}
+                      onChange={handleChange("email")}
+                      placeholder="you@example.com"
                       className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                        errors.name ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
+                        errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
                       }`}
                     />
-                    {errors.name && <p className="text-rose-500 text-xs mt-1">{errors.name}</p>}
+                    {errors.email && <p className="text-rose-500 text-xs mt-1">{errors.email}</p>}
                   </div>
-                )}
 
-                {/* Email */}
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Email Address
-                  </label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={handleChange("email")}
-                    placeholder="you@example.com"
-                    className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                      errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
-                    }`}
-                  />
-                  {errors.email && <p className="text-rose-500 text-xs mt-1">{errors.email}</p>}
-                </div>
+                  {/* Password */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Password</label>
+                    <input
+                      type="password"
+                      value={formData.password}
+                      onChange={handleChange("password")}
+                      placeholder="Min. 6 characters"
+                      className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
+                        errors.password ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
+                      }`}
+                    />
+                    {errors.password && <p className="text-rose-500 text-xs mt-1">{errors.password}</p>}
+                  </div>
 
-                {/* Password */}
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
-                    Password
-                  </label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={handleChange("password")}
-                    placeholder="Min. 6 characters"
-                    className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                      errors.password ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
-                    }`}
-                  />
-                  {errors.password && <p className="text-rose-500 text-xs mt-1">{errors.password}</p>}
-                </div>
-
-                {/* Medical Disclaimer */}
-                <div className={`rounded-xl border p-3.5 transition-colors ${disclaimerChecked ? "border-sky-300 bg-sky-50" : "border-amber-200 bg-amber-50"}`}>
-                  <label className="flex items-start gap-3 cursor-pointer group">
-                    <div className="relative mt-0.5 shrink-0">
-                      <input
-                        type="checkbox"
-                        checked={disclaimerChecked}
-                        onChange={(e) => setDisclaimerChecked(e.target.checked)}
-                        className="sr-only"
-                      />
-                      <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${
-                        disclaimerChecked ? "bg-sky-600 border-sky-600" : "border-amber-400 bg-white group-hover:border-amber-500"
-                      }`}>
-                        {disclaimerChecked && (
-                          <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/>
-                          </svg>
-                        )}
-                      </div>
-                    </div>
-                    <p className="text-xs text-slate-600 leading-relaxed">
-                      <span className="font-bold text-slate-800">Medical Disclaimer: </span>
-                      I understand this AI tool is for{" "}
-                      <span className="font-semibold text-amber-700">educational purposes</span>, can make mistakes, and is{" "}
-                      <span className="font-semibold text-rose-600">NOT a substitute</span> for a qualified doctor's clinical diagnosis.
-                    </p>
-                  </label>
-                </div>
-
-                {/* Submit */}
-                <button
-                  onClick={handleSubmit}
-                  disabled={!disclaimerChecked || isLoading}
-                  className={`w-full py-3 rounded-xl font-bold text-sm transition-all duration-200 shadow-sm ${
-                    disclaimerChecked && !isLoading
-                      ? "bg-sky-600 hover:bg-sky-700 text-white shadow-sky-200 hover:shadow-md active:scale-[0.99]"
-                      : "bg-slate-200 text-slate-400 cursor-not-allowed"
-                  }`}
-                >
-                  {isLoading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  {/* API / auth error */}
+                  {errors.auth && (
+                    <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-3 text-xs text-rose-700 font-semibold">
+                      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                       </svg>
-                      Authenticating…
-                    </span>
-                  ) : authMode === "signin" ? "Sign In to Dashboard" : "Create My Account"}
-                </button>
+                      {errors.auth}
+                    </div>
+                  )}
 
-                {!disclaimerChecked && (
-                  <p className="text-center text-xs text-slate-400">
-                    ☝️ Accept the disclaimer above to enable sign-in
-                  </p>
-                )}
-              </div>
+                  {/* Medical Disclaimer */}
+                  <div className={`rounded-xl border p-3.5 transition-colors ${disclaimerChecked ? "border-sky-300 bg-sky-50" : "border-amber-200 bg-amber-50"}`}>
+                    <label className="flex items-start gap-3 cursor-pointer group">
+                      <div className="relative mt-0.5 shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={disclaimerChecked}
+                          onChange={(e) => setDisclaimerChecked(e.target.checked)}
+                          className="sr-only"
+                        />
+                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${
+                          disclaimerChecked ? "bg-sky-600 border-sky-600" : "border-amber-400 bg-white group-hover:border-amber-500"
+                        }`}>
+                          {disclaimerChecked && (
+                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/>
+                            </svg>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        <span className="font-bold text-slate-800">Medical Disclaimer: </span>
+                        I understand this AI tool is for{" "}
+                        <span className="font-semibold text-amber-700">educational purposes</span>, can make mistakes, and is{" "}
+                        <span className="font-semibold text-rose-600">NOT a substitute</span> for a qualified doctor's clinical diagnosis.
+                      </p>
+                    </label>
+                  </div>
 
-              {/* Admin link */}
-              <div className="px-6 pb-5 text-center">
-                <p className="text-xs text-slate-400">
-                  Healthcare provider?{" "}
+                  {/* Submit */}
                   <button
-                    onClick={() => navigateTo("admin")}
-                    className="text-slate-500 hover:text-sky-600 font-semibold underline underline-offset-2 transition-colors"
+                    onClick={handleSubmit}
+                    disabled={!disclaimerChecked || isLoading}
+                    className={`w-full py-3 rounded-xl font-bold text-sm transition-all duration-200 shadow-sm ${
+                      disclaimerChecked && !isLoading
+                        ? "bg-sky-600 hover:bg-sky-700 text-white shadow-sky-200 hover:shadow-md active:scale-[0.99]"
+                        : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                    }`}
                   >
-                    Admin Login →
+                    {isLoading ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                        </svg>
+                        Authenticating…
+                      </span>
+                    ) : authMode === "signin" ? "Sign In to Dashboard" : "Create My Account"}
                   </button>
-                </p>
+
+                  {!disclaimerChecked && (
+                    <p className="text-center text-xs text-slate-400">
+                      ☝️ Accept the disclaimer above to enable sign-in
+                    </p>
+                  )}
+                </div>
+
+                {/* Admin link */}
+                <div className="px-6 pb-5 text-center">
+                  <p className="text-xs text-slate-400">
+                    Healthcare provider?{" "}
+                    <button
+                      onClick={() => navigateTo("admin")}
+                      className="text-slate-500 hover:text-sky-600 font-semibold underline underline-offset-2 transition-colors"
+                    >
+                      Admin Login →
+                    </button>
+                  </p>
+                </div>
               </div>
-            </div>
             )}
 
-            {/* Trust badge */}
+            {/* Trust badges */}
             <div className="mt-4 flex items-center justify-center gap-4 text-xs text-slate-400">
               <span className="flex items-center gap-1">
-                <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
                 256-bit SSL
               </span>
               <span className="flex items-center gap-1">
-                <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 HIPAA Compliant
               </span>
               <span className="flex items-center gap-1">
-                <svg className="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                 GDPR Ready
               </span>
             </div>
+
           </div>
         </div>
       </main>
