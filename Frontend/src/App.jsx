@@ -1,16 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import LandingView from "./components/LandingView";
 import UserDashboard from "./components/UserDashboard";
 import AdminDashboard from "./components/AdminDashboard";
 
 export default function App() {
-
-  // ── Restore session from localStorage on every page load ──────────────────
-  // If the user was already logged in and refreshes the page, they stay logged
-  // in instead of being sent back to the landing page.
-  const [view, setView] = useState(() => {
-    return localStorage.getItem("isAuthenticated") === "true" ? "user" : "landing";
-  });
+  // Restore session from localStorage on every page load.
+  // If the user was logged in and refreshes, they stay logged in.
+  const [view, setView] = useState(() =>
+    localStorage.getItem("isAuthenticated") === "true" ? "user" : "landing"
+  );
 
   const [user, setUser] = useState(() => {
     const email = localStorage.getItem("userEmail");
@@ -18,14 +16,21 @@ export default function App() {
     return email ? { email, name: name || email.split("@")[0] } : null;
   });
 
+  // Keep isAuthenticated flag in sync whenever view changes to "user"
+  useEffect(() => {
+    if (view === "user") localStorage.setItem("isAuthenticated", "true");
+  }, [view]);
+
   const navigateTo = (target, userData = null) => {
     setView(target);
-    if (userData) setUser(userData);
+    if (userData) {
+      setUser(userData);
+      localStorage.setItem("userEmail", userData.email);
+      localStorage.setItem("userName",  userData.name || userData.email.split("@")[0]);
+    }
   };
 
-  // ── Logout clears everything from localStorage ────────────────────────────
-  // Without this, localStorage keeps stale data and the next visitor of the
-  // device is auto-logged-in as the previous user.
+  // Wipe everything from localStorage so the next visitor can't auto-login
   const handleLogout = () => {
     localStorage.removeItem("userEmail");
     localStorage.removeItem("userName");

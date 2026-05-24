@@ -1,10 +1,13 @@
+import React, { useState, useEffect } from "react";
 import axios from "axios";
-import { useState, useEffect } from "react";
 
-// ── API base URL ──────────────────────────────────────────────────────────────
-// Reads from the Vercel environment variable VITE_API_BASE.
-// Falls back to the Render URL so it always works even if the env var is unset.
-const API_BASE = import.meta.env.VITE_API_BASE || "https://skincancerdetector-vwlq.onrender.com";
+// ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────────
+// Vite STATICALLY replaces import.meta.env.VITE_* at build time by scanning
+// source files. The previous Function("return import.meta.env") trick broke
+// this static analysis so Vite never injected the values — causing the Google
+// button to disappear in production while working fine in dev.
+const API_BASE         = import.meta.env.VITE_API_BASE         || "https://skincancerdetector-vwlq.onrender.com";
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
 const PRECAUTIONS = [
   {
@@ -42,7 +45,7 @@ const PRECAUTIONS = [
   {
     icon: (
       <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/>
       </svg>
     ),
     title: "Avoid Tanning Beds",
@@ -72,118 +75,207 @@ const PRECAUTIONS = [
   },
 ];
 
-export default function LandingView({ navigateTo }) {
-  const [authMode, setAuthMode]           = useState("signin");
-  const [showOTP, setShowOTP]             = useState(false);
-  const [otp, setOtp]                     = useState("");
-  const [formData, setFormData]           = useState({ email: "", password: "", name: "" });
-  const [disclaimerChecked, setDisclaimerChecked] = useState(false);
-  const [isLoading, setIsLoading]         = useState(false);
-  const [errors, setErrors]               = useState({});
+// ── AuthScreen ────────────────────────────────────────────────────────────────
+function AuthScreen({ onLoginSuccess }) {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [formData, setFormData] = useState({ fullName: "", email: "", password: "" });
+  const [error, setError]       = useState("");
+  const [loading, setLoading]   = useState(false);
+  const [gsiLoaded, setGsiLoaded] = useState(false);
 
-  // ── Render warm-up ping ───────────────────────────────────────────────────
-  // Render's free tier sleeps after 15 min of inactivity and takes ~60 s to
-  // wake. Pinging /health the moment the landing page loads means the server
-  // is already warm by the time the user fills the form and hits Submit.
+  // Load the Google Identity Services script once
+  useEffect(() => {
+    if (document.getElementById("google-gsi-client")) { setGsiLoaded(true); return; }
+    const script = document.createElement("script");
+    script.id      = "google-gsi-client";
+    script.src     = "https://accounts.google.com/gsi/client";
+    script.async   = true;
+    script.defer   = true;
+    script.onload  = () => setGsiLoaded(true);
+    script.onerror = () => setError("Failed to load Google Authentication library.");
+    document.body.appendChild(script);
+  }, []);
+
+  // Render the GSI button after the script loads
+  useEffect(() => {
+    if (!gsiLoaded || !GOOGLE_CLIENT_ID) return;
+    try {
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleCredentialResponse,
+      });
+      const target = document.getElementById("google-login-target");
+      if (target) {
+        window.google.accounts.id.renderButton(target, {
+          theme: "filled_blue",
+          size:  "large",
+          shape: "pill",
+          width: target.offsetWidth || 280,
+          text:  isSignUp ? "signup_with" : "signin_with",
+        });
+      }
+    } catch (e) {
+      console.error("Failed to render Google login button:", e);
+    }
+  }, [gsiLoaded, isSignUp]);
+
+  const handleGoogleCredentialResponse = async (response) => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await axios.post(`${API_BASE}/auth/google`, {
+        credential: response.credential,
+      });
+      if (res.data.success) {
+        onLoginSuccess({
+          email: res.data.email,
+          name:  res.data.name || res.data.email.split("@")[0],
+        });
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || "Google Authentication failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    setFormData({ ...formData, [e.target.name]: e.target.value });
+    setError("");
+  };
+
+  const handleManualSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+    const endpoint = isSignUp ? `${API_BASE}/register` : `${API_BASE}/login`;
+    try {
+      const res = await axios.post(endpoint, {
+        email:    formData.email,
+        password: formData.password,
+      });
+      if (res.data.success) {
+        onLoginSuccess({
+          email: res.data.email,
+          name:  isSignUp
+            ? formData.fullName
+            : (res.data.name || res.data.email.split("@")[0]),
+        });
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || "An unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-md w-full mx-auto p-6 bg-white rounded-xl shadow-xl border border-gray-100">
+      <h2 className="text-2xl font-black text-center text-slate-800 mb-6 tracking-tight">
+        {isSignUp ? "Create DermaScan Account" : "Sign In to DermaScan"}
+      </h2>
+
+      {error && (
+        <div className="mb-5 p-3.5 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-sm font-semibold flex items-start gap-2">
+          <svg className="w-5 h-5 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+          </svg>
+          {error}
+        </div>
+      )}
+
+      {/* Google Sign-In button */}
+      <div className="flex justify-center mb-6 w-full drop-shadow-sm hover:drop-shadow transition-all">
+        {GOOGLE_CLIENT_ID ? (
+          <div id="google-login-target" className="w-full flex justify-center min-h-[44px]"/>
+        ) : (
+          <div className="text-xs text-amber-700 bg-amber-50 p-3 border border-amber-200 rounded-lg text-center w-full font-semibold">
+            ⚠️ Google Sign-In is not configured.<br/>
+            Add <code className="font-mono bg-amber-100 px-1 rounded">VITE_GOOGLE_CLIENT_ID</code> to your Vercel environment variables.
+          </div>
+        )}
+      </div>
+
+      <div className="relative flex py-4 items-center mb-2">
+        <div className="flex-grow border-t border-slate-200"/>
+        <span className="flex-shrink mx-4 text-slate-400 text-xs font-bold uppercase tracking-widest">Or use email</span>
+        <div className="flex-grow border-t border-slate-200"/>
+      </div>
+
+      <form onSubmit={handleManualSubmit} className="space-y-4">
+        {isSignUp && (
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wide text-slate-600 mb-1.5">Full Name</label>
+            <input
+              type="text" name="fullName" required
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition-all font-medium text-slate-800"
+              placeholder="Your Name"
+              value={formData.fullName}
+              onChange={handleInputChange}
+            />
+          </div>
+        )}
+        <div>
+          <label className="block text-xs font-bold uppercase tracking-wide text-slate-600 mb-1.5">Email Address</label>
+          <input
+            type="email" name="email" required
+            className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition-all font-medium text-slate-800"
+            placeholder="name@example.com"
+            value={formData.email}
+            onChange={handleInputChange}
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-bold uppercase tracking-wide text-slate-600 mb-1.5">Password</label>
+          <input
+            type="password" name="password" required
+            className="w-full p-3 bg-slate-50 border border-slate-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none transition-all font-medium text-slate-800"
+            placeholder="Min. 6 characters"
+            value={formData.password}
+            onChange={handleInputChange}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full mt-2 bg-slate-900 hover:bg-slate-800 text-white font-black p-3.5 rounded-lg transition-all duration-200 disabled:opacity-50 shadow-md active:scale-[0.98]"
+        >
+          {loading ? "Processing…" : isSignUp ? "Create My Account" : "Sign In"}
+        </button>
+      </form>
+
+      <div className="mt-8 text-center">
+        <button
+          onClick={() => { setIsSignUp(!isSignUp); setError(""); }}
+          className="text-sm font-semibold text-sky-600 hover:text-sky-700 hover:underline transition-colors"
+        >
+          {isSignUp ? "Already have an account? Sign In" : "Don't have an account? Create One"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main LandingView ──────────────────────────────────────────────────────────
+export default function LandingView({ navigateTo }) {
+  // Ping the Render backend as soon as the landing page loads.
+  // Render free tier sleeps after 15 min; this wakes it up before the user
+  // submits the form so they don't mistake a cold-start delay for a failure.
   useEffect(() => {
     axios.get(`${API_BASE}/health`).catch(() => {});
   }, []);
 
-  const validate = () => {
-    const e = {};
-    if (!formData.email.includes("@")) e.email = "Enter a valid email.";
-    if (formData.password.length < 6)  e.password = "Password must be at least 6 characters.";
-    if (authMode === "register" && !formData.name.trim()) e.name = "Name is required.";
-    return e;
+  const handleLoginSuccess = (userData) => {
+    localStorage.setItem("userEmail",       userData.email);
+    localStorage.setItem("userName",        userData.name);
+    localStorage.setItem("isAuthenticated", "true");
+    navigateTo("user", { email: userData.email, name: userData.name });
   };
 
-  // ── Sign-in / Register ────────────────────────────────────────────────────
-  const handleSubmit = async (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length) { setErrors(errs); return; }
-    setErrors({});
-    setIsLoading(true);
-
-    try {
-      if (authMode === "signin") {
-        // BUG 1 FIX: uses API_BASE (Render URL) instead of 127.0.0.1
-        const res = await axios.post(`${API_BASE}/login`, {
-          email:    formData.email,
-          password: formData.password,
-        });
-
-        if (res.data.success || res.status === 200) {
-          const userName = res.data.name || formData.email.split("@")[0];
-          localStorage.setItem("userEmail",        res.data.email);
-          localStorage.setItem("userName",         userName);
-          localStorage.setItem("isAuthenticated",  "true");
-
-          // BUG 2 FIX: pass user object so UserDashboard prop is never null
-          navigateTo("user", { email: res.data.email, name: userName });
-        }
-
-      } else {
-        // BUG 1 FIX: register also uses API_BASE
-        await axios.post(`${API_BASE}/register`, {
-          email:    formData.email,
-          password: formData.password,
-        });
-        setShowOTP(true);
-      }
-    } catch (error) {
-      const detail = error.response?.data?.detail;
-      setErrors({
-        auth: typeof detail === "string"
-          ? detail
-          : "Invalid credentials or server error.",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // ── OTP verification ──────────────────────────────────────────────────────
-  const handleVerifyOTP = async (e) => {
-    e.preventDefault();
-    setErrors({});
-    setIsLoading(true);
-
-    try {
-      // BUG 1 FIX: verify-otp also uses API_BASE
-      const res = await axios.post(`${API_BASE}/verify-otp`, {
-        email: formData.email,
-        otp:   otp,
-      });
-
-      if (res.data.success || res.status === 200) {
-        const userName = formData.name || formData.email.split("@")[0];
-        localStorage.setItem("userEmail",       formData.email);
-        localStorage.setItem("userName",        userName);
-        localStorage.setItem("isAuthenticated", "true");
-
-        // BUG 2 FIX: pass user object here too
-        navigateTo("user", { email: formData.email, name: userName });
-      }
-    } catch (error) {
-      setErrors({ auth: "Invalid or expired verification code." });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleChange = (field) => (e) => {
-    setFormData((p) => ({ ...p, [field]: e.target.value }));
-    setErrors((p) => ({ ...p, [field]: undefined }));
-  };
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER
-  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-sky-50 to-slate-100">
 
-      {/* ── Header ── */}
+      {/* Header */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200/70 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -210,10 +302,10 @@ export default function LandingView({ navigateTo }) {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12">
-        <div className="lg:grid lg:grid-cols-12 lg:gap-12 lg:items-start">
+        <div className="flex flex-col lg:grid lg:grid-cols-12 lg:gap-12 lg:items-start">
 
-          {/* ── Left: Hero + Precaution Cards ── */}
-          <div className="lg:col-span-7 xl:col-span-8 mb-10 lg:mb-0">
+          {/* Hero + Stats */}
+          <div className="lg:col-span-7 xl:col-span-8 order-1 mb-10 lg:mb-0">
             <div className="mb-8">
               <div className="inline-flex items-center gap-2 bg-sky-600/10 text-sky-700 text-xs font-semibold px-3 py-1.5 rounded-full border border-sky-200 mb-4">
                 <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/></svg>
@@ -228,9 +320,7 @@ export default function LandingView({ navigateTo }) {
                 <span className="font-medium text-slate-700"> Early detection saves lives.</span>
               </p>
             </div>
-
-            {/* Stats row */}
-            <div className="grid grid-cols-3 gap-3 mb-8">
+            <div className="grid grid-cols-3 gap-3">
               {[
                 { label: "Scans Analyzed", value: "2.4M+" },
                 { label: "Accuracy Rate",  value: "94.7%" },
@@ -242,230 +332,23 @@ export default function LandingView({ navigateTo }) {
                 </div>
               ))}
             </div>
-
-            {/* Precaution Cards */}
-            <div>
-              <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">
-                Skin Cancer Prevention Guide
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {PRECAUTIONS.map((p) => (
-                  <div key={p.title} className="flex items-start gap-3.5 p-4 rounded-xl border bg-white shadow-sm hover:shadow-md transition-shadow duration-200">
-                    <div className={`p-2 rounded-lg border ${p.color} shrink-0`}>{p.icon}</div>
-                    <div>
-                      <div className="font-bold text-slate-800 text-sm mb-1">{p.title}</div>
-                      <div className="text-slate-500 text-xs leading-relaxed">{p.desc}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
 
-          {/* ── Right: Auth Form ── */}
-          <div className="lg:col-span-5 xl:col-span-4 lg:sticky lg:top-24">
-
-            {/* ── OTP Screen ── */}
-            {showOTP ? (
-              <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden p-8 text-center">
-                <div className="w-16 h-16 bg-sky-50 rounded-2xl flex items-center justify-center mx-auto mb-6 text-sky-500">
-                  <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                  </svg>
-                </div>
-                <h2 className="text-2xl font-black text-slate-800 mb-2">Check your email</h2>
-                <p className="text-sm text-slate-500 mb-8 font-medium leading-relaxed">
-                  We sent a 6-digit code to<br/>
-                  <span className="font-bold text-slate-800">{formData.email}</span>
-                </p>
-                <form onSubmit={handleVerifyOTP} className="space-y-6">
-                  <input
-                    type="text"
-                    maxLength="6"
-                    value={otp}
-                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
-                    placeholder="000000"
-                    className="w-full text-center text-3xl font-black tracking-[0.5em] text-slate-800 bg-slate-50 border border-slate-200 rounded-xl py-4 focus:outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 transition-all"
-                  />
-                  {errors.auth && <p className="text-rose-500 text-xs font-bold">{errors.auth}</p>}
-                  <button
-                    type="submit"
-                    disabled={isLoading || otp.length !== 6}
-                    className="w-full bg-slate-900 text-white font-black rounded-xl py-4 hover:bg-slate-800 active:scale-[0.98] transition-all disabled:opacity-50"
-                  >
-                    {isLoading ? "Verifying…" : "Verify Account"}
-                  </button>
-                </form>
+          {/* Auth Card */}
+          <div className="lg:col-span-5 xl:col-span-4 lg:row-span-2 lg:sticky lg:top-24 order-2 mb-12 lg:mb-0 w-full">
+            <AuthScreen onLoginSuccess={handleLoginSuccess}/>
+            <div className="mt-6 text-center">
+              <p className="text-xs text-slate-400">
+                Healthcare provider?{" "}
                 <button
-                  onClick={() => { setShowOTP(false); setOtp(""); }}
-                  className="mt-6 text-xs font-bold text-slate-400 hover:text-slate-600 transition-colors underline underline-offset-2"
+                  onClick={() => navigateTo("admin")}
+                  className="text-slate-500 hover:text-sky-600 font-semibold underline underline-offset-2 transition-colors"
                 >
-                  Wrong email? Go back.
+                  Admin Login →
                 </button>
-              </div>
-
-            ) : (
-              /* ── Sign In / Register form ── */
-              <div className="bg-white rounded-2xl shadow-xl border border-slate-200/80 overflow-hidden">
-                {/* Form header */}
-                <div className="bg-gradient-to-r from-sky-600 to-sky-500 px-6 py-5">
-                  <h2 className="text-white font-bold text-xl tracking-tight">
-                    {authMode === "signin" ? "Welcome Back" : "Create Account"}
-                  </h2>
-                  <p className="text-sky-100 text-sm mt-0.5">
-                    {authMode === "signin" ? "Sign in to access your dashboard" : "Join DermaScan today — it's free"}
-                  </p>
-                </div>
-
-                {/* Tabs */}
-                <div className="flex border-b border-slate-100">
-                  {["signin", "register"].map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => { setAuthMode(m); setErrors({}); setDisclaimerChecked(false); }}
-                      className={`flex-1 py-3 text-sm font-semibold transition-colors ${
-                        authMode === m
-                          ? "text-sky-600 border-b-2 border-sky-600 bg-sky-50/50"
-                          : "text-slate-400 hover:text-slate-600"
-                      }`}
-                    >
-                      {m === "signin" ? "Sign In" : "Create Account"}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="p-6 space-y-4">
-                  {/* Name (register only) */}
-                  {authMode === "register" && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Full Name</label>
-                      <input
-                        type="text"
-                        value={formData.name}
-                        onChange={handleChange("name")}
-                        placeholder="Sunny Koli"
-                        className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                          errors.name ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
-                        }`}
-                      />
-                      {errors.name && <p className="text-rose-500 text-xs mt-1">{errors.name}</p>}
-                    </div>
-                  )}
-
-                  {/* Email */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Email Address</label>
-                    <input
-                      type="email"
-                      value={formData.email}
-                      onChange={handleChange("email")}
-                      placeholder="you@example.com"
-                      className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                        errors.email ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
-                      }`}
-                    />
-                    {errors.email && <p className="text-rose-500 text-xs mt-1">{errors.email}</p>}
-                  </div>
-
-                  {/* Password */}
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">Password</label>
-                    <input
-                      type="password"
-                      value={formData.password}
-                      onChange={handleChange("password")}
-                      placeholder="Min. 6 characters"
-                      className={`w-full px-3.5 py-2.5 rounded-lg border text-sm text-slate-800 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 transition ${
-                        errors.password ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50 focus:bg-white"
-                      }`}
-                    />
-                    {errors.password && <p className="text-rose-500 text-xs mt-1">{errors.password}</p>}
-                  </div>
-
-                  {/* API / auth error */}
-                  {errors.auth && (
-                    <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-3 text-xs text-rose-700 font-semibold">
-                      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                      </svg>
-                      {errors.auth}
-                    </div>
-                  )}
-
-                  {/* Medical Disclaimer */}
-                  <div className={`rounded-xl border p-3.5 transition-colors ${disclaimerChecked ? "border-sky-300 bg-sky-50" : "border-amber-200 bg-amber-50"}`}>
-                    <label className="flex items-start gap-3 cursor-pointer group">
-                      <div className="relative mt-0.5 shrink-0">
-                        <input
-                          type="checkbox"
-                          checked={disclaimerChecked}
-                          onChange={(e) => setDisclaimerChecked(e.target.checked)}
-                          className="sr-only"
-                        />
-                        <div className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${
-                          disclaimerChecked ? "bg-sky-600 border-sky-600" : "border-amber-400 bg-white group-hover:border-amber-500"
-                        }`}>
-                          {disclaimerChecked && (
-                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/>
-                            </svg>
-                          )}
-                        </div>
-                      </div>
-                      <p className="text-xs text-slate-600 leading-relaxed">
-                        <span className="font-bold text-slate-800">Medical Disclaimer: </span>
-                        I understand this AI tool is for{" "}
-                        <span className="font-semibold text-amber-700">educational purposes</span>, can make mistakes, and is{" "}
-                        <span className="font-semibold text-rose-600">NOT a substitute</span> for a qualified doctor's clinical diagnosis.
-                      </p>
-                    </label>
-                  </div>
-
-                  {/* Submit */}
-                  <button
-                    onClick={handleSubmit}
-                    disabled={!disclaimerChecked || isLoading}
-                    className={`w-full py-3 rounded-xl font-bold text-sm transition-all duration-200 shadow-sm ${
-                      disclaimerChecked && !isLoading
-                        ? "bg-sky-600 hover:bg-sky-700 text-white shadow-sky-200 hover:shadow-md active:scale-[0.99]"
-                        : "bg-slate-200 text-slate-400 cursor-not-allowed"
-                    }`}
-                  >
-                    {isLoading ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                        </svg>
-                        Authenticating…
-                      </span>
-                    ) : authMode === "signin" ? "Sign In to Dashboard" : "Create My Account"}
-                  </button>
-
-                  {!disclaimerChecked && (
-                    <p className="text-center text-xs text-slate-400">
-                      ☝️ Accept the disclaimer above to enable sign-in
-                    </p>
-                  )}
-                </div>
-
-                {/* Admin link */}
-                <div className="px-6 pb-5 text-center">
-                  <p className="text-xs text-slate-400">
-                    Healthcare provider?{" "}
-                    <button
-                      onClick={() => navigateTo("admin")}
-                      className="text-slate-500 hover:text-sky-600 font-semibold underline underline-offset-2 transition-colors"
-                    >
-                      Admin Login →
-                    </button>
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Trust badges */}
-            <div className="mt-4 flex items-center justify-center gap-4 text-xs text-slate-400">
+              </p>
+            </div>
+            <div className="mt-8 flex items-center justify-center gap-4 text-xs text-slate-400">
               <span className="flex items-center gap-1">
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
                 256-bit SSL
@@ -479,8 +362,26 @@ export default function LandingView({ navigateTo }) {
                 GDPR Ready
               </span>
             </div>
-
           </div>
+
+          {/* Prevention Guide */}
+          <div className="lg:col-span-7 xl:col-span-8 order-3">
+            <h2 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4">
+              Skin Cancer Prevention Guide
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {PRECAUTIONS.map((p) => (
+                <div key={p.title} className="flex items-start gap-3.5 p-4 rounded-xl border bg-white shadow-sm hover:shadow-md transition-shadow duration-200">
+                  <div className={`p-2 rounded-lg border ${p.color} shrink-0`}>{p.icon}</div>
+                  <div>
+                    <div className="font-bold text-slate-800 text-sm mb-1">{p.title}</div>
+                    <div className="text-slate-500 text-xs leading-relaxed">{p.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
         </div>
       </main>
     </div>

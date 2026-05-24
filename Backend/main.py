@@ -5,9 +5,9 @@ FastAPI application entry point.
 
 Routes
 ------
-POST /register          — Create a new user account (with SMTP OTP)
-POST /verify-otp        — Verify the OTP code
-POST /login             — Authenticate and return user info
+POST /register          — Create a new user account (Manual registration)
+POST /auth/google       — Verify Google token & register/login user instantly
+POST /login             — Authenticate traditional users & return user info
 POST /upload            — Upload image → S3 → ML prediction → save to RDS
 GET  /history/{email}   — Fetch all scans for a specific user
 POST /admin/login       — Admin dashboard authentication
@@ -17,9 +17,6 @@ GET  /health            — Simple liveness probe
 
 import logging
 import os
-import random              
-import smtplib             
-from email.mime.text import MIMEText  
 from contextlib import asynccontextmanager
 import datetime
 
@@ -29,6 +26,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from dotenv import load_dotenv
+from pydantic import BaseModel
+
+# Google OAuth imports
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 # Local modules
 import models
@@ -55,35 +57,12 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/bmp"}
 MAX_FILE_SIZE_MB       = 10
 MAX_FILE_SIZE_BYTES    = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# ── Email OTP Settings ────────────────────────────────────────────────────────
+# ── Google Client ID Configuration ────────────────────────────────────────────
 
-SENDER_EMAIL = os.environ.get("EMAIL_ADDRESS")
-APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD")           
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 
-def send_otp_email_sync(receiver_email: str, otp_code: str):
-    """
-    Sends the OTP email using Gmail's recommended Port 587 + STARTTLS.
-    Includes a 5.0 second timeout to prevent the server from hanging if the cloud network blocks it.
-    """
-    if not SENDER_EMAIL or not APP_PASSWORD:
-        raise RuntimeError("Missing EMAIL_ADDRESS or EMAIL_APP_PASSWORD in environment variables.")
-
-    body = (
-        f"Welcome to DermaScan!\n\n"
-        f"Your account verification code is: {otp_code}\n\n"
-        f"Please enter this code on the registration page to activate your account."
-    )
-    msg = MIMEText(body)
-    msg['Subject'] = 'DermaScan Account Verification Code'
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = receiver_email
-
-    # Port 587 is the modern standard for Gmail and avoids legacy port blocking
-    with smtplib.SMTP('smtp.gmail.com', 587, timeout=5.0) as server:
-        server.ehlo()
-        server.starttls() # Secure the connection
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.send_message(msg)
+class GoogleAuthRequest(BaseModel):
+    credential: str
 
 # ── App lifespan (startup / shutdown) ─────────────────────────────────────────
 
@@ -201,66 +180,87 @@ def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
             detail="An account with this email already exists.",
         )
 
-    generated_otp = str(random.randint(100000, 999999))
-
+    # Traditional password users are registered immediately
+    # We set is_verified=True directly as email OTP is deprecated
     new_user = models.User(
         email=payload.email,
         hashed_password=hash_password(payload.password),
-        is_verified=False,      
-        otp=generated_otp       
+        is_verified=True,      
+        otp=None       
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    logger.info("New pending user registered: %s (id=%d)", new_user.email, new_user.id)
-
-    # 3. Fire SMTP email
-    try:
-        send_otp_email_sync(new_user.email, generated_otp)
-        logger.info(f"Verification email sent to {new_user.email}")
-    except Exception as e:
-        logger.error(f"Failed to send email: {e}")
-        # Rollback the user so they aren't stuck with an unverified account
-        db.delete(new_user)
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to deliver the verification email. Please check your address and try again.",
-        )
+    logger.info("New manual user registered: %s (id=%d)", new_user.email, new_user.id)
 
     return schemas.AuthResponse(
         success=True,
-        message="Account created successfully. Verification code sent.",
+        message="Account created successfully. You can now log in.",
         email=new_user.email,
         user_id=new_user.id,
     )
 
 
-# ── /verify-otp ───────────────────────────────────────────────────────────────
+# ── /auth/google ──────────────────────────────────────────────────────────────
 
-@app.post("/verify-otp", tags=["Auth"])
-def verify_otp(payload: schemas.OTPVerifyRequest, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.email == payload.email).first()
-    
-    if not user:
+@app.post(
+    "/auth/google",
+    response_model=schemas.AuthResponse,
+    tags=["Auth"],
+)
+def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
+    """
+    Verifies the secure JWT Google token.
+    If the user profile is new, creates their record instantly.
+    If they already exist, logs them in and keeps scan history connected.
+    """
+    if not GOOGLE_CLIENT_ID:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No registration profile identified for this email.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google Client ID is not configured on the server."
         )
 
-    if user.otp != payload.otp:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid verification code. Please check your inbox.",
+    try:
+        # Validate credential against Google authorization servers
+        idinfo = id_token.verify_oauth2_token(
+            payload.credential, 
+            google_requests.Request(), 
+            GOOGLE_CLIENT_ID
+        )
+        
+        email = idinfo['email']
+
+        # Look up existing user record
+        user = db.query(models.User).filter(models.User.email == email).first()
+
+        # Seamless registration flow if user is accessing for the first time
+        if not user:
+            user = models.User(
+                email=email,
+                hashed_password="GOOGLE_OAUTH_USER",  # Secure flag indicating a Google Auth account
+                is_verified=True, 
+                otp=None
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            logger.info("New Google user registered: %s (id=%d)", user.email, user.id)
+        else:
+            logger.info("Existing Google user logged in: %s (id=%d)", user.email, user.id)
+
+        return schemas.AuthResponse(
+            success=True,
+            message="Authenticated successfully with Google.",
+            email=user.email,
+            user_id=user.id
         )
 
-    user.is_verified = True
-    user.otp = None  
-    db.commit()
-
-    logger.info("User account successfully verified: %s", user.email)
-    return {"success": True, "message": "Account fully verified.", "email": user.email}
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google authentication token."
+        )
 
 
 # ── /login ────────────────────────────────────────────────────────────────────
@@ -269,7 +269,20 @@ def verify_otp(payload: schemas.OTPVerifyRequest, db: Session = Depends(get_db))
 def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == payload.email).first()
 
-    if not user or not verify_password(payload.password, user.hashed_password):
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
+
+    # Block manual password attempts for users who authenticated with Google OAuth
+    if user.hashed_password == "GOOGLE_OAUTH_USER":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You created this account using Google. Please click 'Sign in with Google' above."
+        )
+
+    if not verify_password(payload.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",

@@ -1,14 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import axios from "axios";
-// NOTE: @react-google-maps/api import has been REMOVED.
-// The DoctorTab uses a plain <iframe> Google Maps embed which needs no package.
-// Keeping an unused import for an uninstalled package crashes the Vercel build.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS & UTILITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE = (typeof process !== "undefined" && process.env && process.env.VITE_API_BASE) || "https://skincancerdetector-vwlq.onrender.com";
+const API_BASE = import.meta.env.VITE_API_BASE || "https://skincancerdetector-vwlq.onrender.com";
 
 const BADGE_STYLES = {
   Benign:    { pill: "bg-emerald-100 text-emerald-700 border-emerald-200", dot: "bg-emerald-500", ring: "#10b981" },
@@ -41,7 +38,6 @@ const NAV_ITEMS = [
   },
 ];
 
-// FIX 1: Robust date parsing utility to prevent Safari "Invalid Date" bugs
 function formatDate(iso) {
   if (!iso) return "";
   let ts = String(iso).replace(" ", "T");
@@ -111,13 +107,20 @@ function UploadModal({ mode, onClose, onSuccess }) {
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
 
-  // FIX 3: Prevent memory leak if user closes modal before camera stream finishes loading
   const startCamera = async () => {
     setUploadError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       
-      // If modal was closed while waiting for permissions
       if (!videoRef.current) {
         stream.getTracks().forEach((t) => t.stop());
         return;
@@ -125,15 +128,23 @@ function UploadModal({ mode, onClose, onSuccess }) {
       
       streamRef.current = stream;
       videoRef.current.srcObject = stream; 
-      videoRef.current.play();
+      
+      videoRef.current.setAttribute('playsinline', 'true');
+      videoRef.current.muted = true;
+      
+      await videoRef.current.play();
       setIsStreaming(true);
-    } catch {
-      setUploadError("Camera access denied or unavailable. Please check your browser permissions.");
+    } catch (err) {
+      console.error("Camera resolution error:", err);
+      setUploadError("Unable to open camera. Please check your system hardware permissions and confirm no other application is using the lens.");
     }
   };
 
   const stopCamera = useCallback(() => {
-    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+    if (streamRef.current) { 
+      streamRef.current.getTracks().forEach((t) => t.stop()); 
+      streamRef.current = null; 
+    }
     setIsStreaming(false);
   }, []);
 
@@ -146,15 +157,36 @@ function UploadModal({ mode, onClose, onSuccess }) {
     if (!videoRef.current || !canvasRef.current) return;
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext("2d");
+
+    // 1. SMART CROPPING: Focus on central region to match UI guide brackets
+    const shortestSide = Math.min(video.videoWidth, video.videoHeight);
+    const cropSize = shortestSide * 0.85; 
+    const startX = (video.videoWidth - cropSize) / 2;
+    const startY = (video.videoHeight - cropSize) / 2;
+
+    canvas.width = cropSize;
+    canvas.height = cropSize;
+
+    // 2. AUTO-ENHANCEMENT: Increase brightness and sharp contrast to remove shadows
+    ctx.filter = "brightness(1.15) contrast(1.15) saturate(1.1)";
+
+    // 3. DRAW EXPLICIT CROP
+    ctx.drawImage(
+      video,
+      startX, startY, cropSize, cropSize,
+      0, 0, cropSize, cropSize
+    );
+    
+    ctx.filter = "none"; // reset filter state
+
+    // 4. EXPORT FILE AT MAXIMUM QUALITY FOR HIGHER ML RECONSTRUCTION
     canvas.toBlob((blob) => {
-      const f = new File([blob], "camera-capture.jpg", { type: "image/jpeg" });
+      const f = new File([blob], "enhanced-camera-capture.jpg", { type: "image/jpeg" });
       setFile(f);
       setPreview(URL.createObjectURL(f));
       stopCamera();
-    }, "image/jpeg", 0.95);
+    }, "image/jpeg", 0.98);
   };
 
   const handleFile = (f) => {
@@ -201,7 +233,6 @@ function UploadModal({ mode, onClose, onSuccess }) {
           <div className="w-10 h-1.5 rounded-full bg-slate-200"/>
         </div>
         <div className="px-6 pb-7 pt-4 overflow-y-auto">
-          {/* Header */}
           <div className="flex items-center justify-between mb-5">
             <h3 className="text-xl font-black text-slate-800 tracking-tight">
               {result ? "Analysis Complete" : mode === "camera" && !preview ? "Capture Image" : "Review & Upload"}
@@ -213,12 +244,17 @@ function UploadModal({ mode, onClose, onSuccess }) {
             )}
           </div>
 
-          {/* ── Camera viewfinder ── */}
           {!result && mode === "camera" && !preview && (
             <div className="flex flex-col items-center">
               <div className="w-full aspect-[4/5] bg-black rounded-2xl overflow-hidden relative shadow-inner">
                 {isStreaming ? (
-                  <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover"/>
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline 
+                    muted 
+                    className="w-full h-full object-cover"
+                  />
                 ) : (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
                     <svg className="animate-spin w-8 h-8 mb-2" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
@@ -251,7 +287,6 @@ function UploadModal({ mode, onClose, onSuccess }) {
             </div>
           )}
 
-          {/* ── Upload file picker / preview ── */}
           {!result && (mode === "upload" || preview) && (
             <>
               <div
@@ -283,7 +318,6 @@ function UploadModal({ mode, onClose, onSuccess }) {
                   </div>
                 )}
               </div>
-              {/* FIX 2: Clear input value so selecting the same file twice triggers onChange */}
               <input 
                 ref={inputRef} 
                 type="file" 
@@ -312,7 +346,7 @@ function UploadModal({ mode, onClose, onSuccess }) {
 
               {uploadError && (
                 <div className="mb-5 flex items-start gap-3 bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-700 shadow-sm">
-                  <svg className="w-5 h-5 shrink-0 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                  <svg className="w-5 h-5 shrink-0 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77(1.333).192 3 1.732 3z"/></svg>
                   <span className="font-semibold leading-tight">{uploadError}</span>
                 </div>
               )}
@@ -331,7 +365,6 @@ function UploadModal({ mode, onClose, onSuccess }) {
             </>
           )}
 
-          {/* ── Success result ── */}
           {result && (
             <div className="flex flex-col items-center gap-5">
               <div className="w-full rounded-2xl overflow-hidden shadow-inner bg-slate-50 flex items-center justify-center" style={{ maxHeight: 200 }}>
@@ -491,7 +524,6 @@ function HistoryGrid({ history, loading, error, onRetry }) {
               <div className="relative z-10 flex flex-col h-full justify-between">
                 <div className="flex justify-between items-start">
                   <div>
-                    {/* FIX 1 applied: Uses proper formatting to avoid Safari crash */}
                     <p className="text-[11px] opacity-90 font-bold uppercase tracking-wider">
                       {formatDate(scan.created_at)}
                     </p>
@@ -684,6 +716,9 @@ export default function UserDashboard({ user, onLogout }) {
             {(displayName[0] ?? "U").toUpperCase()}
           </div>
         </header>
+        <header className="hidden md:flex items-center justify-between px-8 py-4 bg-white border-b border-slate-200 shrink-0">
+          <div className="text-xl font-bold text-slate-800 capitalize">{activeTab}</div>
+        </header>
         <main className="flex-1 overflow-y-auto pb-20 md:pb-0">{renderContent()}</main>
         <nav className="md:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 shadow-lg z-30 safe-bottom">
           <div className="flex">
@@ -823,7 +858,7 @@ function DoctorTab() {
           loading="lazy"
           allowFullScreen
           referrerPolicy="no-referrer-when-downgrade"
-          src={`https://maps.google.com/maps?q=${encodeURIComponent(mapQuery)}&ie=UTF8&iwloc=&output=embed`}
+          src={`https://maps.google.com/maps?q=${encodeURIComponent(mapQuery)}&t=&z=13&ie=UTF8&iwloc=&output=embed`}
         />
       </div>
       <div className="bg-sky-50 border border-sky-100 rounded-2xl p-4 flex gap-3 items-center">
